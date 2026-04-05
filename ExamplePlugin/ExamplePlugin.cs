@@ -16,7 +16,7 @@ namespace DroneLaserTest
     [BepInPlugin(PluginGuid, PluginName, PluginVersion)]
     public class DroneLaserTestPlugin : BaseUnityPlugin
     {
-        public const string PluginGuid = "com.yourname.dronelasertest";
+        public const string PluginGuid = "com.fatalkp.dronelasertest";
         public const string PluginName = "Drone Laser Test";
         public const string PluginVersion = "0.1.0";
 
@@ -145,8 +145,6 @@ namespace DroneLaserTest
                 LogSkillSlot("special", golemSkillLocator.special);
             }
 
-            // Extra diagnostics: inspect all components for fields/properties that reference SkillDef or SkillFamily
-            DumpPrefabSkillReferences(golemBodyPrefab);
 
             // Prefer the secondary skillDef if available
             if (golemSkillLocator != null && golemSkillLocator.secondary != null && golemSkillLocator.secondary.skillDef != null)
@@ -224,9 +222,6 @@ namespace DroneLaserTest
             golemLaserSkillDef.isCombatSkill = true;
 
             ContentAddition.AddSkillDef(golemLaserSkillDef);
-
-            // Ensure we don't reuse the base game's skill family asset so we avoid touching Stone Golem behavior.
-            golemLaserSkillFamily = null;
 
             Logger.LogInfo($"Customized Stone Golem laser cooldown to {DroneLaserCooldownSeconds:0.0}s for the drone.");
         }
@@ -384,51 +379,6 @@ namespace DroneLaserTest
             return null;
         }
 
-        private void DumpPrefabSkillReferences(GameObject prefab)
-        {
-            if (prefab == null) return;
-            Component[] comps = prefab.GetComponentsInChildren<Component>(true);
-            foreach (var comp in comps)
-            {
-                if (comp == null) continue;
-                var t = comp.GetType();
-                var fields = t.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                foreach (var f in fields)
-                {
-                    if (typeof(SkillDef).IsAssignableFrom(f.FieldType) || typeof(SkillFamily).IsAssignableFrom(f.FieldType) || typeof(GenericSkill).IsAssignableFrom(f.FieldType))
-                    {
-                        object val = f.GetValue(comp);
-                        if (val == null)
-                        {
-                            Logger.LogInfo($"Component {t.FullName} field {f.Name} = null");
-                        }
-                        else
-                        {
-                            Logger.LogInfo($"Component {t.FullName} field {f.Name} = {val.GetType().FullName}");
-                        }
-                    }
-                }
-
-                var props = t.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                foreach (var p in props)
-                {
-                    if (typeof(SkillDef).IsAssignableFrom(p.PropertyType) || typeof(SkillFamily).IsAssignableFrom(p.PropertyType) || typeof(GenericSkill).IsAssignableFrom(p.PropertyType))
-                    {
-                        object val = null;
-                        try { val = p.GetValue(comp); } catch { }
-                        if (val == null)
-                        {
-                            Logger.LogInfo($"Component {t.FullName} prop {p.Name} = null");
-                        }
-                        else
-                        {
-                            Logger.LogInfo($"Component {t.FullName} prop {p.Name} = {val.GetType().FullName}");
-                        }
-                    }
-                }
-            }
-        }
-
         private void ReplaceDronePrimarySkillWithLaser(GameObject bodyPrefab)
         {
             if (!golemLaserSkillDef)
@@ -456,18 +406,7 @@ namespace DroneLaserTest
                 viewableNode = new ViewablesCatalog.Node(golemLaserSkillDef.skillNameToken, false, null)
             };
 
-            // If we loaded a complete SkillFamily, prefer to assign it so variants and references are preserved.
-            if (golemLaserSkillFamily != null)
-            {
-                primarySkill._skillFamily = ScriptableObject.Instantiate(golemLaserSkillFamily);
-                Logger.LogInfo("Assigned full Golem SkillFamily to drone primary.");
-                // Attempt to clone and register any referenced prefabs used by the SkillFamily/SkillDef variants
-                CloneAndRegisterSkillFamilyAssets(primarySkill._skillFamily);
-            }
-            else
-            {
-                primarySkill._skillFamily = family;
-            }
+            primarySkill._skillFamily = family;
 
             // Optional: disable the drone's old secondary so it mostly just uses laser.
             if (skillLocator.secondary)
@@ -493,8 +432,8 @@ namespace DroneLaserTest
                 object skillSlotObj = GetFieldOrPropertyValue(type, comp, "skillSlot");
                 if (skillSlotObj is SkillSlot && (SkillSlot)skillSlotObj == SkillSlot.Primary)
                 {
-                    SetFieldOrProperty(type, comp, "minDistance", 15f);
-                    SetFieldOrProperty(type, comp, "maxDistance", 60f);
+                    SetFieldOrProperty(type, comp, "minDistance", 5f);
+                    SetFieldOrProperty(type, comp, "maxDistance", 300f);
                     SetFieldOrProperty(type, comp, "requireLineOfSight", true);
 
                     SetEnumField(type, comp, "moveTargetType", "CurrentEnemy");
