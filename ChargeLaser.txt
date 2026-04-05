@@ -1,0 +1,220 @@
+using System;
+using RoR2;
+using UnityEngine;
+
+namespace EntityStates.GolemMonster
+{
+	// Token: 0x020004F4 RID: 1268
+	public class ChargeLaser : BaseState
+	{
+		// Token: 0x060018D9 RID: 6361 RVA: 0x0006EE7C File Offset: 0x0006D07C
+		public override void Reset()
+		{
+			base.Reset();
+			this.duration = 0f;
+			this.chargePlayID = 0U;
+			this.chargeEffect = null;
+			this.laserLineComponent = null;
+			this.laserDirection = Vector3.zero;
+			this.visualEndPosition = Vector3.zero;
+			this.flashTimer = 0f;
+			this.laserOn = false;
+			this._efh_Charge = null;
+		}
+
+		// Token: 0x060018DA RID: 6362 RVA: 0x0006EEE0 File Offset: 0x0006D0E0
+		public override void OnEnter()
+		{
+			base.OnEnter();
+			base.SetAIUpdateFrequency(true);
+			this.duration = ChargeLaser.baseDuration / this.attackSpeedStat;
+			Transform modelTransform = base.GetModelTransform();
+			this.chargePlayID = Util.PlayAttackSpeedSound(ChargeLaser.attackSoundString, base.gameObject, this.attackSpeedStat);
+			if (modelTransform)
+			{
+				ChildLocator component = modelTransform.GetComponent<ChildLocator>();
+				if (component)
+				{
+					Transform transform = component.FindChild("MuzzleLaser");
+					if (transform)
+					{
+						if (ChargeLaser.effectPrefab)
+						{
+							if (!EffectManager.ShouldUsePooledEffect(ChargeLaser.effectPrefab))
+							{
+								this.chargeEffect = UnityEngine.Object.Instantiate<GameObject>(ChargeLaser.effectPrefab, transform.position, transform.rotation);
+							}
+							else
+							{
+								this._efh_Charge = EffectManager.GetAndActivatePooledEffect(ChargeLaser.effectPrefab, transform.position, transform.rotation);
+								this.chargeEffect = this._efh_Charge.gameObject;
+							}
+							this.chargeEffect.transform.parent = transform;
+							ScaleParticleSystemDuration component2 = this.chargeEffect.GetComponent<ScaleParticleSystemDuration>();
+							if (component2)
+							{
+								component2.newDuration = this.duration;
+							}
+						}
+						if (ChargeLaser.laserPrefab && this.laserEffect == null)
+						{
+							this.laserEffect = UnityEngine.Object.Instantiate<GameObject>(ChargeLaser.laserPrefab, transform.position, transform.rotation);
+						}
+						if (this.laserEffect != null)
+						{
+							if (!this.laserEffect.activeInHierarchy)
+							{
+								this.laserEffect.SetActive(true);
+							}
+							if (this.laserEffect.transform.parent != transform)
+							{
+								this.laserEffect.transform.parent = transform;
+							}
+							this.laserLineComponent = this.laserEffect.GetComponent<LineRenderer>();
+						}
+					}
+				}
+			}
+			if (base.characterBody)
+			{
+				base.characterBody.SetAimTimer(this.duration);
+			}
+			this.flashTimer = 0f;
+			this.laserOn = true;
+		}
+
+		// Token: 0x060018DB RID: 6363 RVA: 0x0006F0C4 File Offset: 0x0006D2C4
+		public override void OnExit()
+		{
+			AkSoundEngine.StopPlayingID(this.chargePlayID);
+			base.OnExit();
+			base.SetAIUpdateFrequency(false);
+			if (this.chargeEffect)
+			{
+				if (!EffectManager.UsePools)
+				{
+					EntityState.Destroy(this.chargeEffect);
+				}
+				else if (this._efh_Charge != null && this._efh_Charge.OwningPool != null)
+				{
+					if (!this._efh_Charge.OwningPool.IsObjectInPool(this._efh_Charge))
+					{
+						this._efh_Charge.OwningPool.ReturnObject(this._efh_Charge);
+					}
+				}
+				else
+				{
+					this._efh_Charge != null;
+					EntityState.Destroy(this.chargeEffect);
+				}
+			}
+			if (this.laserEffect && this.laserEffect.activeInHierarchy)
+			{
+				this.laserEffect.SetActive(false);
+			}
+		}
+
+		// Token: 0x060018DC RID: 6364 RVA: 0x0006F194 File Offset: 0x0006D394
+		public override void Update()
+		{
+			base.Update();
+			if (this.laserEffect && this.laserLineComponent)
+			{
+				float num = 1000f;
+				Ray aimRay = base.GetAimRay();
+				Vector3 position = this.laserEffect.transform.parent.position;
+				Vector3 point = aimRay.GetPoint(num);
+				this.laserDirection = point - position;
+				RaycastHit raycastHit;
+				if (Physics.Raycast(aimRay, out raycastHit, num, LayerIndex.world.mask | LayerIndex.entityPrecise.mask))
+				{
+					point = raycastHit.point;
+				}
+				this.laserLineComponent.SetPosition(0, position);
+				this.laserLineComponent.SetPosition(1, point);
+				float num2;
+				if (this.duration - base.age > 0.5f)
+				{
+					num2 = base.age / this.duration;
+				}
+				else
+				{
+					this.flashTimer -= Time.deltaTime;
+					if (this.flashTimer <= 0f)
+					{
+						this.laserOn = !this.laserOn;
+						this.flashTimer = 0.033333335f;
+					}
+					num2 = (this.laserOn ? 1f : 0f);
+				}
+				num2 *= ChargeLaser.laserMaxWidth;
+				this.laserLineComponent.startWidth = num2;
+				this.laserLineComponent.endWidth = num2;
+			}
+		}
+
+		// Token: 0x060018DD RID: 6365 RVA: 0x0006F2F0 File Offset: 0x0006D4F0
+		public override void FixedUpdate()
+		{
+			base.FixedUpdate();
+			if (base.fixedAge >= this.duration && base.isAuthority)
+			{
+				FireLaser fireLaser = new FireLaser();
+				fireLaser.laserDirection = this.laserDirection;
+				this.outer.SetNextState(fireLaser);
+				return;
+			}
+		}
+
+		// Token: 0x060018DE RID: 6366 RVA: 0x000122E7 File Offset: 0x000104E7
+		public override InterruptPriority GetMinimumInterruptPriority()
+		{
+			return InterruptPriority.Skill;
+		}
+
+		// Token: 0x04001E81 RID: 7809
+		public static float baseDuration = 3f;
+
+		// Token: 0x04001E82 RID: 7810
+		public static float laserMaxWidth = 0.2f;
+
+		// Token: 0x04001E83 RID: 7811
+		public static GameObject effectPrefab;
+
+		// Token: 0x04001E84 RID: 7812
+		public static GameObject laserPrefab;
+
+		// Token: 0x04001E85 RID: 7813
+		public static string attackSoundString;
+
+		// Token: 0x04001E86 RID: 7814
+		private float duration;
+
+		// Token: 0x04001E87 RID: 7815
+		private uint chargePlayID;
+
+		// Token: 0x04001E88 RID: 7816
+		private GameObject chargeEffect;
+
+		// Token: 0x04001E89 RID: 7817
+		private GameObject laserEffect;
+
+		// Token: 0x04001E8A RID: 7818
+		private LineRenderer laserLineComponent;
+
+		// Token: 0x04001E8B RID: 7819
+		private Vector3 laserDirection;
+
+		// Token: 0x04001E8C RID: 7820
+		private Vector3 visualEndPosition;
+
+		// Token: 0x04001E8D RID: 7821
+		private float flashTimer;
+
+		// Token: 0x04001E8E RID: 7822
+		private bool laserOn;
+
+		// Token: 0x04001E8F RID: 7823
+		protected EffectManagerHelper _efh_Charge;
+	}
+}
