@@ -23,4 +23,10 @@
 		<PackageReference Include="MMHOOK.RoR2" Version="2025.11.19" NoWarn="NU1701" />
 	</ItemGroup>
 
+	<ItemGroup>
+	  <None Update="laserdroneprefab">
+	    <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+	  </None>
+	</ItemGroup>
+
 </Project>

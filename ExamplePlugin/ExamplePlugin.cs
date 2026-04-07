@@ -2,13 +2,16 @@ using BepInEx;
 using R2API;
 using R2API.Utils;
 using RoR2;
+using RoR2.CharacterAI;
 using RoR2.Skills;
 using System;
+using System.IO;
 using System.Collections.Generic;
 using System.Reflection;
 using UnityEngine;
 using UnityEngine.AddressableAssets;
 using UnityEngine.Networking;
+using UnityEngine.Rendering;
 
 namespace DroneLaserTest
 {
@@ -23,11 +26,16 @@ namespace DroneLaserTest
         private GameObject droneBodyPrefab;
         private GameObject droneMasterPrefab;
 
+        private AssetBundle mainAssetBundle;
+        private GameObject customModelPrefab;
+        private Sprite customIcon;
+
         private SkillDef golemLaserSkillDef;
         private SkillFamily golemLaserSkillFamily;
         private const float DroneLaserCooldownSeconds = 3f;
         public void Awake()
         {
+            LoadAssets();
             CreateDrone();
             RegisterDrone();
         }
@@ -62,28 +70,21 @@ namespace DroneLaserTest
             if (gunnerDroneMaster == null) Logger.LogError("Failed to load Gunner Drone master prefab.");
             if (golemBody == null) Logger.LogError("Failed to load Golem body prefab.");
 
-            // Use a local clone helper instead of PrefabAPI.InstantiateClone which may not be available in this build context.
-            droneBodyPrefab = InstantiateClone(gunnerDroneBody, "LaserDroneBody", true);
-            droneMasterPrefab = InstantiateClone(gunnerDroneMaster, "LaserDroneMaster", true);
+            droneBodyPrefab = PrefabAPI.InstantiateClone(gunnerDroneBody, "LaserDroneBody", true);
+            droneMasterPrefab = PrefabAPI.InstantiateClone(gunnerDroneMaster, "LaserDroneMaster", true);
 
             if (droneBodyPrefab == null) Logger.LogError("droneBodyPrefab is null after cloning.");
             if (droneMasterPrefab == null) Logger.LogError("droneMasterPrefab is null after cloning.");
 
             ConfigureBody(droneBodyPrefab);
             ConfigureMaster(droneMasterPrefab, droneBodyPrefab);
+            ApplyCustomModel(droneBodyPrefab);
             EnsureMuzzleLaserChild(droneBodyPrefab);
 
             GrabGolemLaserSkill(golemBody);
             CustomizeLaserSkillForDrone();
             ReplaceDronePrimarySkillWithLaser(droneBodyPrefab);
             TuneAI(droneMasterPrefab);
-        }
-
-        private GameObject InstantiateClone(GameObject original, string cloneName, bool register)
-        {
-            GameObject clone = R2API.PrefabAPI.InstantiateClone(original, cloneName, register);
-
-            return clone;
         }
 
         private void ConfigureBody(GameObject bodyPrefab)
@@ -98,12 +99,373 @@ namespace DroneLaserTest
             body.baseArmor = 20f;
             body.baseMoveSpeed = 10f;
             body.baseAcceleration = 80f;
+
+            if (customIcon)
+            {
+                body.portraitIcon = customIcon.texture;
+            }
         }
 
         private void ConfigureMaster(GameObject masterPrefab, GameObject bodyPrefab)
         {
             CharacterMaster master = masterPrefab.GetComponent<CharacterMaster>();
             master.bodyPrefab = bodyPrefab;
+        }
+
+        private void ApplyCustomModel(GameObject bodyPrefab)
+        {
+            if (!bodyPrefab)
+                return;
+
+            if (!customModelPrefab)
+            {
+                Logger.LogInfo("Custom laser drone model prefab not loaded; keeping stock Gunner Drone visuals.");
+                return;
+            }
+
+            CharacterBody body = bodyPrefab.GetComponent<CharacterBody>();
+            ModelLocator modelLocator = bodyPrefab.GetComponent<ModelLocator>();
+
+            if (!body || !modelLocator)
+            {
+                Logger.LogWarning("Missing CharacterBody or ModelLocator on the drone prefab, cannot apply custom model.");
+                return;
+            }
+
+            Transform modelBase = modelLocator.modelBaseTransform;
+            if (!modelBase)
+            {
+                GameObject baseObj = new GameObject("ModelBase");
+                baseObj.transform.SetParent(bodyPrefab.transform);
+                baseObj.transform.localPosition = Vector3.zero;
+                baseObj.transform.localRotation = Quaternion.identity;
+                baseObj.transform.localScale = Vector3.one;
+                modelBase = baseObj.transform;
+                modelLocator.modelBaseTransform = modelBase;
+            }
+
+            Transform oldModel = modelLocator.modelTransform;
+            Animator oldAnimator = oldModel ? oldModel.GetComponent<Animator>() : null;
+            HurtBoxGroup oldHurtBoxes = oldModel ? oldModel.GetComponent<HurtBoxGroup>() ?? oldModel.GetComponentInChildren<HurtBoxGroup>() : null;
+
+            GameObject newModel = InstantiatePreparedCustomModel();
+            if (!newModel)
+            {
+                Logger.LogWarning("Failed to prepare custom laser drone model; keeping stock Gunner Drone visuals.");
+                return;
+            }
+
+            newModel.transform.SetParent(modelBase, false);
+            newModel.transform.localPosition = Vector3.zero;
+            newModel.transform.localRotation = Quaternion.identity;
+            newModel.transform.localScale = Vector3.one;
+
+            modelLocator.modelTransform = newModel.transform;
+
+            CharacterModel characterModel = newModel.GetComponent<CharacterModel>();
+            if (!characterModel)
+            {
+                characterModel = newModel.AddComponent<CharacterModel>();
+                characterModel.autoPopulateLightInfos = true;
+                characterModel.baseRendererInfos = BuildRendererInfos(newModel);
+            }
+            else
+            {
+                characterModel.body = body;
+                if (characterModel.baseRendererInfos == null || characterModel.baseRendererInfos.Length == 0)
+                {
+                    characterModel.baseRendererInfos = BuildRendererInfos(newModel);
+                }
+            }
+
+            characterModel.body = body;
+            characterModel.mainSkinnedMeshRenderer ??= newModel.GetComponentInChildren<SkinnedMeshRenderer>();
+
+            HurtBoxGroup newHurtBoxGroup = newModel.GetComponent<HurtBoxGroup>() ?? newModel.GetComponentInChildren<HurtBoxGroup>();
+            if (newHurtBoxGroup)
+            {
+                body.mainHurtBox = newHurtBoxGroup.mainHurtBox;
+                body.hurtBoxGroup = newHurtBoxGroup;
+            }
+            else if (oldHurtBoxes)
+            {
+                body.mainHurtBox = oldHurtBoxes.mainHurtBox;
+                body.hurtBoxGroup = oldHurtBoxes;
+            }
+
+            ChildLocator childLocator = newModel.GetComponent<ChildLocator>();
+            if (!childLocator)
+            {
+                childLocator = newModel.AddComponent<ChildLocator>();
+            }
+            if (childLocator)
+            {
+                PopulateChildLocatorIfMissing(childLocator, childLocator.transform);
+                Transform aim = childLocator.FindChild("AimOrigin") ?? childLocator.FindChild("Head") ?? childLocator.FindChild("Muzzle");
+                if (aim)
+                {
+                    body.aimOriginTransform = aim;
+                }
+                characterModel.childLocator = childLocator;
+            }
+
+            Animator newAnimator = newModel.GetComponent<Animator>();
+            if (!newAnimator && oldAnimator)
+            {
+                newAnimator = newModel.AddComponent<Animator>();
+            }
+            if (newAnimator && oldAnimator)
+            {
+                newAnimator.runtimeAnimatorController = oldAnimator.runtimeAnimatorController;
+                newAnimator.avatar = oldAnimator.avatar;
+                newAnimator.applyRootMotion = oldAnimator.applyRootMotion;
+                newAnimator.updateMode = oldAnimator.updateMode;
+                newAnimator.cullingMode = oldAnimator.cullingMode;
+            }
+
+            FixupRendererMaterials(newModel, oldModel);
+
+            if (oldModel && oldModel.gameObject != newModel)
+            {
+                UnityEngine.Object.Destroy(oldModel.gameObject);
+            }
+
+            Logger.LogInfo("Applied custom laser drone model prefab to the cloned body.");
+        }
+
+        private CharacterModel.RendererInfo[] BuildRendererInfos(GameObject modelRoot)
+        {
+            if (!modelRoot)
+                return Array.Empty<CharacterModel.RendererInfo>();
+
+            Renderer[] renderers = modelRoot.GetComponentsInChildren<Renderer>(true);
+            CharacterModel.RendererInfo[] infos = new CharacterModel.RendererInfo[renderers.Length];
+
+            for (int i = 0; i < renderers.Length; i++)
+            {
+                Renderer renderer = renderers[i];
+                infos[i] = new CharacterModel.RendererInfo
+                {
+                    renderer = renderer,
+                    defaultMaterial = renderer.sharedMaterial,
+                    defaultShadowCastingMode = renderer.shadowCastingMode,
+                    ignoreOverlays = false
+                };
+            }
+
+            return infos;
+        }
+
+        private GameObject InstantiatePreparedCustomModel()
+        {
+            if (!customModelPrefab)
+                return null;
+
+            GameObject instance = UnityEngine.Object.Instantiate(customModelPrefab);
+            if (!instance)
+                return null;
+
+            instance.name = customModelPrefab.name;
+
+            Transform extracted = ExtractVisualModelTransform(instance.transform);
+            if (!extracted)
+            {
+                Logger.LogWarning("Custom model prefab had no identifiable visual root; using entire prefab.");
+                extracted = instance.transform;
+            }
+
+            if (extracted != instance.transform)
+            {
+                extracted.SetParent(null, false);
+                UnityEngine.Object.Destroy(instance);
+            }
+
+            GameObject model = extracted.gameObject;
+
+            if (!HasRenderableGeometry(model))
+            {
+                Logger.LogError("Custom laser drone model prefab contains no renderers; aborting swap.");
+                UnityEngine.Object.Destroy(model);
+                return null;
+            }
+
+            StripGameplayComponents(model);
+            return model;
+        }
+
+        private Transform ExtractVisualModelTransform(Transform root)
+        {
+            if (!root)
+                return null;
+
+            ModelLocator locator = root.GetComponent<ModelLocator>() ?? root.GetComponentInChildren<ModelLocator>(true);
+            if (locator && locator.modelTransform)
+                return locator.modelTransform;
+
+            string[] preferredNames = { "mdlLaserDrone", "mdlDrone1", "mdlDrone", "mdl", "ModelBase" };
+            foreach (string name in preferredNames)
+            {
+                Transform found = FindChildRecursive(root, name);
+                if (found)
+                {
+                    if (string.Equals(name, "ModelBase", StringComparison.OrdinalIgnoreCase) && found.childCount > 0)
+                    {
+                        return found.GetChild(0);
+                    }
+                    return found;
+                }
+            }
+
+            return root;
+        }
+
+        private void StripGameplayComponents(GameObject root)
+        {
+            if (!root)
+                return;
+
+            Type[] componentTypes =
+            {
+                typeof(CharacterBody),
+                typeof(CharacterDirection),
+                typeof(CharacterMotor),
+                typeof(InputBankTest),
+                typeof(SkillLocator),
+                typeof(EntityStateMachine),
+                typeof(AISkillDriver),
+                typeof(ModelLocator),
+                typeof(NetworkIdentity),
+                typeof(Rigidbody),
+                typeof(Rigidbody2D),
+                typeof(CharacterJoint),
+                typeof(ConfigurableJoint),
+                typeof(SpringJoint)
+            };
+
+            int removed = 0;
+            foreach (Type type in componentTypes)
+            {
+                Component[] comps = root.GetComponentsInChildren(type, true);
+                foreach (Component comp in comps)
+                {
+                    if (!comp)
+                        continue;
+                    UnityEngine.Object.Destroy(comp);
+                    removed++;
+                }
+            }
+
+            if (removed > 0)
+            {
+                Logger.LogInfo($"Stripped {removed} gameplay components from custom model prefab to prevent duplicate body behaviour.");
+            }
+        }
+
+        private bool HasRenderableGeometry(GameObject modelRoot)
+        {
+            if (!modelRoot)
+                return false;
+
+            Renderer[] renderers = modelRoot.GetComponentsInChildren<Renderer>(true);
+            return renderers != null && renderers.Length > 0;
+        }
+
+        private void FixupRendererMaterials(GameObject newModel, Transform oldModel)
+        {
+            if (!newModel)
+                return;
+
+            Renderer[] newRenderers = newModel.GetComponentsInChildren<Renderer>(true);
+            if (newRenderers == null || newRenderers.Length == 0)
+            {
+                Logger.LogWarning("Custom model prefab has no renderers after instantiation.");
+                return;
+            }
+
+            Renderer[] oldRenderers = oldModel ? oldModel.GetComponentsInChildren<Renderer>(true) : Array.Empty<Renderer>();
+            Material fallbackMaterial = oldRenderers != null && oldRenderers.Length > 0
+                ? oldRenderers[0].sharedMaterial
+                : null;
+            Shader fallbackShader = fallbackMaterial ? fallbackMaterial.shader : null;
+
+            if (!fallbackShader)
+            {
+                fallbackShader = Shader.Find("Hopoo Games/Deferred/Standard") ?? Shader.Find("Standard");
+            }
+
+            int materialsFixed = 0;
+            foreach (Renderer renderer in newRenderers)
+            {
+                if (!renderer)
+                    continue;
+
+                renderer.gameObject.SetActive(true);
+                renderer.enabled = true;
+                renderer.forceRenderingOff = false;
+
+                Material[] materials = renderer.sharedMaterials;
+                if (materials == null || materials.Length == 0)
+                {
+                    if (fallbackMaterial)
+                    {
+                        renderer.sharedMaterial = UnityEngine.Object.Instantiate(fallbackMaterial);
+                        materialsFixed++;
+                    }
+                    continue;
+                }
+
+                bool updatedArray = false;
+
+                for (int i = 0; i < materials.Length; i++)
+                {
+                    Material mat = materials[i];
+                    if (!mat)
+                    {
+                        if (fallbackMaterial)
+                        {
+                            materials[i] = UnityEngine.Object.Instantiate(fallbackMaterial);
+                            updatedArray = true;
+                            materialsFixed++;
+                        }
+                        continue;
+                    }
+
+                    if (!mat.shader || mat.shader.name == "Hidden/InternalErrorShader")
+                    {
+                        if (fallbackShader)
+                        {
+                            mat.shader = fallbackShader;
+                            materialsFixed++;
+                        }
+                    }
+                }
+
+                if (updatedArray)
+                {
+                    renderer.sharedMaterials = materials;
+                }
+            }
+
+            Logger.LogInfo($"Custom model renderers: {newRenderers.Length}. Materials adjusted: {materialsFixed}.");
+        }
+
+        private Transform FindChildRecursive(Transform root, string childName)
+        {
+            if (!root || string.IsNullOrEmpty(childName))
+                return null;
+
+            if (string.Equals(root.name, childName, StringComparison.OrdinalIgnoreCase))
+                return root;
+
+            for (int i = 0; i < root.childCount; i++)
+            {
+                Transform child = root.GetChild(i);
+                Transform match = FindChildRecursive(child, childName);
+                if (match)
+                    return match;
+            }
+
+            return null;
         }
 
         private void GrabGolemLaserSkill(GameObject golemBodyPrefab)
@@ -220,6 +582,10 @@ namespace DroneLaserTest
             golemLaserSkillDef.cancelSprintingOnActivation = false;
             golemLaserSkillDef.mustKeyPress = false;
             golemLaserSkillDef.isCombatSkill = true;
+            if (customIcon)
+            {
+                golemLaserSkillDef.icon = customIcon;
+            }
 
             ContentAddition.AddSkillDef(golemLaserSkillDef);
 
@@ -231,134 +597,56 @@ namespace DroneLaserTest
             if (!bodyPrefab)
                 return;
 
-            ChildLocator locator = bodyPrefab.GetComponentInChildren<ChildLocator>();
+            ChildLocator locator = null;
+            ModelLocator modelLocator = bodyPrefab.GetComponent<ModelLocator>();
+            Transform modelTransform = modelLocator ? modelLocator.modelTransform : null;
+
+            if (modelLocator && modelLocator.modelTransform)
+            {
+                locator = modelLocator.modelTransform.GetComponent<ChildLocator>();
+            }
+
+            locator ??= bodyPrefab.GetComponentInChildren<ChildLocator>();
+            if (!locator && modelTransform)
+            {
+                locator = modelTransform.gameObject.AddComponent<ChildLocator>();
+            }
+
+            if (locator && modelTransform)
+            {
+                PopulateChildLocatorIfMissing(locator, modelTransform);
+            }
+
             if (!locator)
             {
                 Logger.LogWarning("Drone body has no ChildLocator; cannot create MuzzleLaser.");
                 return;
             }
 
-            string[] sourceNames =
-            {
-                "GunBarrel",
-                "MuzzleRight",
-                "Muzzle",
-                "MuzzleFront",
-                "GunMuzzle"
-            };
-
-            Transform source = null;
-            foreach (string candidate in sourceNames)
-            {
-                source = locator.FindChild(candidate);
-                if (source)
-                    break;
-            }
-
-            if (!source)
-            {
-                Logger.LogWarning("Failed to find a muzzle transform to anchor MuzzleLaser; laser visuals may originate from the origin.");
-                return;
-            }
-
-            Transform muzzleLaser = locator.FindChild("MuzzleLaser");
+            Transform muzzleLaser = locator.FindChild("MuzzleLaser") ?? FindChildRecursive(modelTransform, "MuzzleLaser");
             if (!muzzleLaser)
             {
+                Transform source = locator.FindChild("Muzzle") ?? locator.FindChild("MuzzleGun") ?? FindChildRecursive(modelTransform, "Muzzle") ?? FindChildRecursive(modelTransform, "MuzzleGun");
+                if (!source)
+                {
+                    Logger.LogWarning("Failed to find a muzzle transform to anchor MuzzleLaser; laser visuals may originate from the origin.");
+                    return;
+                }
+
                 GameObject go = new GameObject("MuzzleLaser");
                 muzzleLaser = go.transform;
+                muzzleLaser.SetParent(source, false);
+                muzzleLaser.localPosition = Vector3.zero;
+                muzzleLaser.localRotation = Quaternion.identity;
+                muzzleLaser.localScale = Vector3.one;
+                Logger.LogInfo($"Created fallback 'MuzzleLaser' under '{source.name}'.");
             }
-
-            muzzleLaser.SetParent(source, false);
-            muzzleLaser.localPosition = Vector3.zero;
-            muzzleLaser.localRotation = Quaternion.identity;
-            muzzleLaser.localScale = Vector3.one;
+            else
+            {
+                Logger.LogInfo("Using existing 'MuzzleLaser' transform from the custom model prefab.");
+            }
 
             EnsureChildLocatorEntry(locator, "MuzzleLaser", muzzleLaser);
-            Logger.LogInfo($"Added 'MuzzleLaser' child under '{source.name}' for Stone Golem laser states.");
-        }
-
-        private void MergeChildLocators(ChildLocator target, ChildLocator source)
-        {
-            if (!target || !source)
-                return;
-
-            BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
-            FieldInfo pairsField = typeof(ChildLocator).GetField("transformPairs", flags);
-            if (pairsField == null)
-                return;
-
-            Array sourcePairs = pairsField.GetValue(source) as Array;
-            if (sourcePairs == null || sourcePairs.Length == 0)
-                return;
-
-            Array targetPairs = pairsField.GetValue(target) as Array;
-            Type pairType = sourcePairs.GetType().GetElementType();
-            if (pairType == null)
-                return;
-
-            FieldInfo nameField = pairType.GetField("name", flags);
-            FieldInfo transformField = pairType.GetField("transform", flags);
-            if (nameField == null || transformField == null)
-                return;
-
-            List<object> merged = new List<object>();
-            HashSet<string> existingNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-            if (targetPairs != null)
-            {
-                for (int i = 0; i < targetPairs.Length; i++)
-                {
-                    object entry = targetPairs.GetValue(i);
-                    if (entry != null)
-                    {
-                        merged.Add(entry);
-                        string existingName = nameField.GetValue(entry) as string;
-                        if (!string.IsNullOrEmpty(existingName))
-                        {
-                            existingNames.Add(existingName);
-                        }
-                    }
-                }
-            }
-
-            List<string> addedNames = new List<string>();
-            for (int i = 0; i < sourcePairs.Length; i++)
-            {
-                object entry = sourcePairs.GetValue(i);
-                if (entry == null)
-                    continue;
-
-                string name = nameField.GetValue(entry) as string;
-                if (string.IsNullOrEmpty(name) || !existingNames.Add(name))
-                    continue;
-
-                Transform transform = transformField.GetValue(entry) as Transform;
-                object newPair = Activator.CreateInstance(pairType);
-                nameField.SetValue(newPair, name);
-                transformField.SetValue(newPair, transform);
-                merged.Add(newPair);
-                addedNames.Add(name);
-            }
-
-            Array mergedArray = Array.CreateInstance(pairType, merged.Count);
-            for (int i = 0; i < merged.Count; i++)
-            {
-                mergedArray.SetValue(merged[i], i);
-            }
-            pairsField.SetValue(target, mergedArray);
-
-            foreach (string added in addedNames)
-            {
-                if (!string.IsNullOrEmpty(added))
-                {
-                    target.FindChild(added);
-                }
-            }
-
-            if (addedNames.Count > 0)
-            {
-                Logger.LogInfo($"Merged ChildLocator entries for laser transforms: {string.Join(", ", addedNames)}");
-            }
         }
 
         private SkillDef FindLaserSkillDefInPrefab(GameObject prefab)
@@ -419,78 +707,19 @@ namespace DroneLaserTest
 
         private void TuneAI(GameObject masterPrefab)
         {
-            // AISkillDriver type may not be available in this compilation context, so use reflection to find components named 'AISkillDriver'.
-            Component[] components = masterPrefab.GetComponents<Component>();
-
-            foreach (Component comp in components)
+            AISkillDriver[] drivers = masterPrefab.GetComponents<AISkillDriver>();
+            foreach (AISkillDriver driver in drivers)
             {
-                var type = comp.GetType();
-                if (type.Name != "AISkillDriver")
-                    continue;
-
-                // Get skillSlot value (enum) and check if it's Primary
-                object skillSlotObj = GetFieldOrPropertyValue(type, comp, "skillSlot");
-                if (skillSlotObj is SkillSlot && (SkillSlot)skillSlotObj == SkillSlot.Primary)
+                if (driver.skillSlot == SkillSlot.Primary)
                 {
-                    SetFieldOrProperty(type, comp, "minDistance", 5f);
-                    SetFieldOrProperty(type, comp, "maxDistance", 300f);
-                    SetFieldOrProperty(type, comp, "requireLineOfSight", true);
-
-                    SetEnumField(type, comp, "moveTargetType", "CurrentEnemy");
-                    SetEnumField(type, comp, "movementType", "ChaseMoveTarget");
-                    SetEnumField(type, comp, "aimType", "AtCurrentEnemy");
-                    SetEnumField(type, comp, "buttonPressType", "Hold");
+                    driver.minDistance = 5f;
+                    driver.maxDistance = 300f;
+                    driver.selectionRequiresTargetLoS = true;
+                    driver.moveTargetType = AISkillDriver.TargetType.CurrentEnemy;
+                    driver.movementType = AISkillDriver.MovementType.ChaseMoveTarget;
+                    driver.aimType = AISkillDriver.AimType.AtCurrentEnemy;
+                    driver.buttonPressType = AISkillDriver.ButtonPressType.Hold;
                 }
-            }
-        }
-
-        private object GetFieldOrPropertyValue(Type type, object obj, string name)
-        {
-            FieldInfo f = type.GetField(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            if (f != null) return f.GetValue(obj);
-            PropertyInfo p = type.GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            if (p != null) return p.GetValue(obj);
-            return null;
-        }
-
-        private bool SetFieldOrProperty(Type type, object obj, string name, object value)
-        {
-            FieldInfo f = type.GetField(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            if (f != null)
-            {
-                f.SetValue(obj, value);
-                return true;
-            }
-            PropertyInfo p = type.GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            if (p != null && p.CanWrite)
-            {
-                p.SetValue(obj, value);
-                return true;
-            }
-            return false;
-        }
-
-        private void SetEnumField(Type type, object obj, string name, string enumValueName)
-        {
-            FieldInfo f = type.GetField(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            Type enumType = null;
-            if (f != null) enumType = f.FieldType;
-            else
-            {
-                PropertyInfo p = type.GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                if (p != null) enumType = p.PropertyType;
-            }
-
-            if (enumType == null || !enumType.IsEnum) return;
-
-            try
-            {
-                object enumValue = Enum.Parse(enumType, enumValueName);
-                SetFieldOrProperty(type, obj, name, enumValue);
-            }
-            catch
-            {
-                // ignore parse/set failures
             }
         }
 
@@ -498,6 +727,8 @@ namespace DroneLaserTest
         {
             if (!locator || string.IsNullOrEmpty(alias) || !target)
                 return;
+
+            PopulateChildLocatorIfMissing(locator, locator.transform);
 
             BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
             FieldInfo pairsField = typeof(ChildLocator).GetField("transformPairs", flags);
@@ -555,6 +786,39 @@ namespace DroneLaserTest
             locator.FindChild(alias);
         }
 
+        private void PopulateChildLocatorIfMissing(ChildLocator locator, Transform root)
+        {
+            if (!locator || !root)
+                return;
+
+            BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+            FieldInfo pairsField = typeof(ChildLocator).GetField("transformPairs", flags);
+            Type pairType = typeof(ChildLocator).GetNestedType("NameTransformPair", flags);
+            if (pairsField == null || pairType == null)
+                return;
+
+            Array existing = pairsField.GetValue(locator) as Array;
+            if (existing != null && existing.Length > 0)
+                return;
+
+            FieldInfo nameField = pairType.GetField("name", flags);
+            FieldInfo transformField = pairType.GetField("transform", flags);
+            if (nameField == null || transformField == null)
+                return;
+
+            Transform[] transforms = root.GetComponentsInChildren<Transform>(true);
+            Array pairs = Array.CreateInstance(pairType, transforms.Length);
+            for (int i = 0; i < transforms.Length; i++)
+            {
+                object entry = Activator.CreateInstance(pairType);
+                nameField.SetValue(entry, transforms[i].name);
+                transformField.SetValue(entry, transforms[i]);
+                pairs.SetValue(entry, i);
+            }
+
+            pairsField.SetValue(locator, pairs);
+        }
+
         private void RegisterDrone()
         {
             LanguageAPI.Add("LASER_DRONE_NAME", "Laser Drone");
@@ -563,39 +827,6 @@ namespace DroneLaserTest
 
             ContentAddition.AddBody(droneBodyPrefab);
             ContentAddition.AddMaster(droneMasterPrefab);
-        }
-
-        private void CloneAndRegisterSkillFamilyAssets(SkillFamily family)
-        {
-            if (family == null) return;
-            foreach (var variant in family.variants)
-            {
-                // SkillFamily.Variant is a struct — don't compare to null. Just check skillDef.
-                if (variant.skillDef == null) continue;
-                var sd = variant.skillDef;
-                // Common GameObject fields in SkillDef: projectilePrefab, muzzleEffectPrefab, impactEffectPrefab
-                TryCloneAndRegisterPrefabField(sd, "projectilePrefab");
-                TryCloneAndRegisterPrefabField(sd, "muzzleEffectPrefab");
-                TryCloneAndRegisterPrefabField(sd, "impactEffectPrefab");
-                // Some SkillDefs reference other prefab-like fields; scan all fields for GameObject references as well
-                var sdType = sd.GetType();
-                var fields = sdType.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                foreach (var f in fields)
-                {
-                    if (f.FieldType == typeof(GameObject))
-                    {
-                        try
-                        {
-                            var go = f.GetValue(sd) as GameObject;
-                            if (go != null)
-                            {
-                                TryCloneAndRegisterGameObject(go);
-                            }
-                        }
-                        catch { }
-                    }
-                }
-            }
         }
 
         private void TryCloneAndRegisterPrefabField(SkillDef sd, string fieldName)
@@ -667,6 +898,55 @@ namespace DroneLaserTest
                 Logger.LogInfo("Spawned Laser Drone.");
             else
                 Logger.LogError("Failed to spawn Laser Drone.");
+        }
+        private void LoadAssets()
+        {
+            if (mainAssetBundle != null)
+                return;
+
+            string assemblyFolder = System.IO.Path.GetDirectoryName(Info.Location);
+            string bundlePath = System.IO.Path.Combine(assemblyFolder, "laserdroneprefab");
+
+            if (!File.Exists(bundlePath))
+            {
+                Logger.LogWarning($"Asset bundle not found at {bundlePath}; custom laser drone model will be skipped.");
+                return;
+            }
+
+            mainAssetBundle = AssetBundle.LoadFromFile(bundlePath);
+
+            if (mainAssetBundle == null)
+            {
+                Logger.LogError($"Failed to load asset bundle at: {bundlePath}");
+                return;
+            }
+
+            const string modelAssetPath = "Assets/RoR2/Base/Characters/Drones/LaserDrone/LaserDroneBody.prefab";
+            const string iconAssetPath = "Assets/RoR2/Base/Characters/Drones/LaserDrone/texLaserDrone Icon.asset";
+
+            try
+            {
+                customModelPrefab = mainAssetBundle.LoadAsset<GameObject>(modelAssetPath);
+                Logger.LogInfo(customModelPrefab
+                    ? $"Loaded custom laser drone model prefab '{modelAssetPath}'."
+                    : "Custom laser drone model prefab was not found inside the asset bundle.");
+            }
+            catch (Exception e)
+            {
+                Logger.LogError($"Failed to load custom model prefab '{modelAssetPath}': {e}");
+            }
+
+            try
+            {
+                customIcon = mainAssetBundle.LoadAsset<Sprite>(iconAssetPath);
+                Logger.LogInfo(customIcon
+                    ? $"Loaded custom laser drone icon '{iconAssetPath}'."
+                    : "Custom laser drone icon sprite was not found inside the asset bundle.");
+            }
+            catch (Exception e)
+            {
+                Logger.LogError($"Failed to load custom icon sprite '{iconAssetPath}': {e}");
+            }
         }
     }
 }
